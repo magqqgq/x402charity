@@ -32,6 +32,8 @@ import {
   type Charity,
 } from 'x402charity';
 
+// USDC mint addresses per network — keyed on the same enum the rest of the
+// codebase uses so call-sites stay type-safe.
 const USDC_MINTS: Record<SolanaNetwork, string> = {
   'solana-mainnet': USDC_MAINNET_ADDRESS,
   'solana-devnet': USDC_DEVNET_ADDRESS,
@@ -177,21 +179,29 @@ export async function createCharityServer(options: ServerOptions = {}): Promise<
   }
 
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '32kb' }));
 
-  // CORS — allow any origin for read-only GET endpoints (dashboard, public data).
-  // POST /donate is server-to-server (not browser-initiated), so CORS doesn't
-  // add protection there. The x402 payment signature is the access control.
-  const allowedOrigins = process.env.CORS_ORIGINS?.split(',').map(s => s.trim());
+  // --- CORS ----------------------------------------------------------------
+  // The default policy is origin-restricted: read the allow-list from
+  // CORS_ORIGINS (comma-separated) and reflect only matching origins back.
+  // This prevents unrelated websites from calling our public JSON endpoints
+  // from a victim's browser. If you intentionally want to serve a public,
+  // read-only dashboard, set CORS_ORIGINS="*" and audit the consequence.
+  const allowedOrigins = process.env.CORS_ORIGINS?.split(',').map(s => s.trim()).filter(Boolean) ?? [];
+  const corsAllowAll = allowedOrigins.length === 1 && allowedOrigins[0] === '*';
   app.use((req, res, next) => {
     const origin = req.headers.origin || '';
-    if (allowedOrigins) {
-      if (allowedOrigins.includes(origin)) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-        res.setHeader('Vary', 'Origin');
-      }
-    } else {
+    if (corsAllowAll) {
       res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    } else if (origin && !allowedOrigins.length) {
+      // No allow-list configured and a browser Origin is present — refuse.
+      // Non-browser callers (curl, server-to-server) do not send Origin and
+      // therefore fall through to the next middleware.
+      res.status(403).json({ error: 'CORS: origin not allowed' });
+      return;
     }
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Payment, Payment-Signature');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
